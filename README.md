@@ -1,4 +1,6 @@
-# Tree Decomposition Attention for AMR-to-Text Generation
+# Generalized Shortest-Paths Encoders for AMR-to-Text Generation
+**Note:** This branch implements the adjacency matrix multiplication method described in Section 4.2 of the corresponding [paper](https://www.aclweb.org/anthology/2020.coling-main.181.pdf). For Floyd-Warshall, go to the `fl-wa` branch.
+
 **Credit:** This code is based on the [repo](https://github.com/jcyk/gtos) for the 2020 AAAI paper "Graph Transformer for Graph-to-Sequence Learning". We are grateful to the authors for open-sourcing their work.
 
 ## Environment Setup
