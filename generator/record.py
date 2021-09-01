@@ -62,7 +62,7 @@ if __name__ == "__main__":
             model_args.token_char_dim, model_args.token_dim,
             model_args.concept_char_dim, model_args.concept_dim,
             model_args.cnn_filters, model_args.char2word_dim, model_args.char2concept_dim,
-            model_args.rel_dim, model_args.rnn_hidden_size, model_args.rel_num_heads,
+            model_args.rel_dim, model_args.rnn_hidden_size,
             model_args.embed_dim, model_args.ff_embed_dim, model_args.num_heads, model_args.dropout,
             model_args.snt_layers, model_args.graph_layers, model_args.inference_layers,
             model_args.pretrained_file,

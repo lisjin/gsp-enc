@@ -123,38 +123,30 @@ def ArraysToTensor(xs):
         tensor = torch.from_numpy(data).long()
     return tensor
 
-def loop_data(data, vocabs, all_relations, _relation_type, is_train=True):
+def loop_data(data, vocabs, all_relations, _relation_type):
     for bidx, x in enumerate(data):
         n = len(x['concept'])
-        num_concepts, num_paths = 0, 0
-        num_concepts = max(n+1, num_concepts)
-        brs = [ [3]+[1]*(n) ] if is_train else [ [[3]]+[[1]]*(n) ]
+        brs = [ [3]+[1]*(n) ]
         for i in range(n):
-            rs = [2] if is_train else [[2]]
+            rs = [2]
             adj_dict = x['relation'][str(i)]
             adj_set = set([int(k) for k in adj_dict.keys()])
             for j in range(n):
                 if i == j: # self loop
-                    path = [SEL]
+                    path = SEL
                 elif j in adj_set:
-                    path = adj_dict[str(j)][0]['edge']
+                    path = adj_dict[str(j)][0]['edge'][0]
                 else:
-                    path = [PAD]
-                path = tuple(vocabs['relation'].token2idx(path))
+                    path = PAD
+                path = vocabs['relation'].token2idx(path)
                 rtype = all_relations.get(path, len(all_relations))
                 if rtype == len(all_relations):
                     all_relations[path] = len(all_relations)
-                if not is_train:
-                    num_paths = max(len(rs), num_paths)
-                rs.append(rtype if is_train else [rtype])
-            if is_train:
-                rs = np.array(rs, dtype=np.int)
+                rs.append(rtype)
+            rs = np.array(rs, dtype=np.int)
             brs.append(rs)
-        if is_train:
-            brs = np.stack(brs)
+        brs = np.stack(brs)
         _relation_type.append(brs)
-        if not is_train:
-            return num_concepts, num_paths
 
 def batchify(data, vocabs, unk_rate=0., train=True):
     _conc = ListsToTensor([ [CLS]+x['concept'] for x in data], vocabs['concept'], unk_rate=unk_rate)
@@ -166,25 +158,16 @@ def batchify(data, vocabs, unk_rate=0., train=True):
     rcls_idx = vocabs['relation'].token2idx(rCLS)
     self_idx = vocabs['relation'].token2idx(SEL)
     pad_idx = vocabs['relation'].token2idx(PAD)
-    all_relations[tuple([pad_idx])] = 0
-    all_relations[tuple([cls_idx])] = 1
-    all_relations[tuple([rcls_idx])] = 2
-    all_relations[tuple([self_idx])] = 3
+    all_relations[pad_idx] = 0
+    all_relations[cls_idx] = 1
+    all_relations[rcls_idx] = 2
+    all_relations[self_idx] = 3
     _relation_type = []
     loop_data(data, vocabs, all_relations, _relation_type)
     _relation_type = ArraysToTensor(_relation_type).transpose_(0, 2)
     # _relation_bank[_relation_type[i][j][b]] => from j to i go through what
 
-    B = len(all_relations)
-    _relation_bank = dict()
-    _relation_length = dict()
-    for k, v in all_relations.items():
-        _relation_bank[v] = np.array(k, dtype=np.int)
-        _relation_length[v] = len(k)
-    _relation_bank = [_relation_bank[i] for i in range(len(all_relations))]
-    _relation_length = [_relation_length[i] for i in range(len(all_relations))]
-    _relation_bank = ArraysToTensor(_relation_bank).t_()
-    _relation_length = torch.LongTensor(_relation_length)
+    _relation_bank = torch.LongTensor(list(all_relations.keys()))
 
     local_token2idx = [x['token2idx'] for x in data]
     local_idx2token = [x['idx2token'] for x in data]
@@ -205,7 +188,6 @@ def batchify(data, vocabs, unk_rate=0., train=True):
         'concept_depth': _depth,
         'relation': _relation_type,
         'relation_bank': _relation_bank,
-        'relation_length': _relation_length,
         'local_idx2token': local_idx2token,
         'local_token2idx': local_token2idx,
         'token_in':_token_in,

@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.nn import Parameter
 import torch.nn.functional as F
+import torch.jit as jit
 import math
 
 class Transformer(nn.Module):
@@ -45,19 +46,20 @@ class TransformerLayer(nn.Module):
                 self_padding_mask = None, self_attn_mask = None,
                 external_memories = None, external_padding_mask=None,
                 need_weights = False):
+        # type: (Tensor, Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], bool) -> Tuple[Tensor, Optional[Tensor], Optional[Tensor]]
         # x: seq_len x bsz x embed_dim
         residual = x
         if kv is None:
             x, self_attn = self.self_attn(query=x, key=x, value=x, key_padding_mask=self_padding_mask, attn_mask=self_attn_mask, need_weights=need_weights, qkv_same=True)
         else:
-            x, self_attn = self.self_attn(query=x, key=kv, value=kv, key_padding_mask=self_padding_mask, attn_mask=self_attn_mask, need_weights=need_weights)
+            x, self_attn = self.self_attn(query=x, key=kv, value=kv, key_padding_mask=self_padding_mask, attn_mask=self_attn_mask, need_weights=need_weights, kv_same=True)
 
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.attn_layer_norm(residual + x)
 
         if self.with_external:
             residual = x
-            x, external_attn = self.external_attn(query=x, key=external_memories, value=external_memories, key_padding_mask=external_padding_mask, need_weights=need_weights, kv_same=True)
+            x, external_attn = self.external_attn(query=x, key=external_memories, value=external_memories, key_padding_mask=external_padding_mask, need_weights=need_weights)
             x = F.dropout(x, p=self.dropout, training=self.training)
             x = self.external_layer_norm(residual + x)
         else:
@@ -96,11 +98,12 @@ class MultiheadAttention(nn.Module):
         nn.init.constant_(self.out_proj.bias, 0.)
 
     def forward(self, query, key, value, key_padding_mask=None, attn_mask=None, need_weights=False, qkv_same=False, kv_same=False):
-        # type: (Tensor, Tensor, Tensor, Optional[Tensor], Optional[Tensor], bool, bool, bool) -> Tuple[Tensor, Tensor]
+        # type: (Tensor, Tensor, Tensor, Optional[Tensor], Optional[Tensor], bool, bool, bool) -> Tuple[Tensor, Optional[Tensor]]
         """ Input shape: Time x Batch x Channel
             key_padding_mask: Time x batch
             attn_mask:  tgt_len x src_len
         """
+
         tgt_len, bsz, embed_dim = query.size()
         assert key.size() == value.size()
 
@@ -166,7 +169,7 @@ class MultiheadAttention(nn.Module):
             attn_weights, _ = attn_weights.max(dim=1)
             attn_weights = attn_weights.transpose(0, 1)
 
-        return attn, attn_weights
+        return attn, (attn_weights if need_weights else None)
 
     def in_proj_qkv(self, query):
         return self._in_proj(query).chunk(3, dim=-1)
@@ -186,11 +189,11 @@ class MultiheadAttention(nn.Module):
     def _in_proj(self, input, start=None, end=None):
         # type: (Tensor, Optional[int], Optional[int])
         weight = self.in_proj_weight
+        bias = self.in_proj_bias
         if start is None:
             start = 0
         if end is None:
             end = weight.shape[0]
-        bias = self.in_proj_bias
         weight = weight[start:end, :]
         if bias is not None:
             bias = bias[start:end]

@@ -2,8 +2,7 @@
 dataset=../data/AMR/amr_2.0
 NGPU=3
 LR=1e-3
-RNN_SZ=216
-MAX_M=6
+RNN_SZ=256
 CKPT="ckpt_$(date +%m-%d-%H-%M)"
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -11,7 +10,6 @@ while [[ "$#" -gt 0 ]]; do
         -l|--lr) LR=$2; shift ;;
         -r|--rnn_sz) RNN_SZ=$2; shift ;;
         -c|--ckpt) CKPT=$2; shift ;;
-        -m|--max_m) MAX_M=$2; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
@@ -25,8 +23,6 @@ python3 train.py --token_vocab ${dataset}/token_vocab\
     --train_data ${dataset}/train.txt.features.preproc.json\
     --dev_data ${dataset}/dev.txt.features.preproc.json\
     --rnn_hidden_size $RNN_SZ\
-    --max_m $MAX_M\
-    --rel_num_heads 8\
     --token_char_dim 32\
     --token_dim 300\
     --concept_char_dim 32\

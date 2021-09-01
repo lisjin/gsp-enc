@@ -58,9 +58,8 @@ def validate(model, test_data, golden_file, beam_size=8, alpha=0.6, max_time_ste
     assert len(sys_stream) == len(ref_stream)
     sys_stream = [ pp.post_process(o, abstract[i], graph[i]) for i, o in enumerate(sys_stream)]
 
-    bleu = sacrebleu.corpus_bleu(sys_stream, ref_streams, 
-                          force=True, lowercase=True, 
-                          tokenize='none').score
+    bleu = sacrebleu.corpus_bleu(sys_stream, ref_streams, force=True,
+            lowercase=True, tokenize='none').score
     chrf = sacrebleu.corpus_chrf(sys_stream, ref_stream)
 
     return bleu, chrf
@@ -97,10 +96,11 @@ if __name__ == "__main__":
             model_args.token_char_dim, model_args.token_dim,
             model_args.concept_char_dim, model_args.concept_dim,
             model_args.cnn_filters, model_args.char2word_dim, model_args.char2concept_dim,
-            model_args.rel_dim, model_args.rnn_hidden_size, model_args.rel_num_heads,
+            model_args.rel_dim, model_args.rnn_hidden_size,
             model_args.embed_dim, model_args.ff_embed_dim, model_args.num_heads, model_args.dropout,
             model_args.snt_layers, model_args.graph_layers, model_args.inference_layers,
-            model_args.max_m, model_args.pretrained_file, device)
+            model_args.pretrained_file,
+            device)
 
     test_data = DataLoader(vocabs, lexical_mapping, args.test_data, args.test_batch_size, for_train=False)
     for test_model in test_models:

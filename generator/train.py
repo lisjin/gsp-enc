@@ -39,8 +39,6 @@ def parse_config():
     # relation encoder
     parser.add_argument('--rel_dim', type=int)
     parser.add_argument('--rnn_hidden_size', type=int)
-    parser.add_argument('--rel_num_heads', type=int)
-    parser.add_argument('--max_m', type=int)
 
     # core architecture
     parser.add_argument('--embed_dim', type=int)
@@ -103,16 +101,16 @@ def main(args, local_rank):
     torch.cuda.manual_seed_all(19940117)
     random.seed(19940117)
 
-    torch.cuda.set_device(local_rank)
     device = torch.device('cuda', local_rank)
     model = Generator(vocabs,
             args.token_char_dim, args.token_dim,
             args.concept_char_dim, args.concept_dim,
             args.cnn_filters, args.char2word_dim, args.char2concept_dim,
-            args.rel_dim, args.rnn_hidden_size, args.rel_num_heads,
+            args.rel_dim, args.rnn_hidden_size,
             args.embed_dim, args.ff_embed_dim, args.num_heads, args.dropout,
             args.snt_layers, args.graph_layers, args.inference_layers,
-            args.max_m, args.pretrained_file, device).cuda(device)
+            args.pretrained_file,
+            device).cuda(device)
 
     if args.world_size > 1:
         torch.manual_seed(19940117 + dist.get_rank())
@@ -125,7 +123,6 @@ def main(args, local_rank):
 
     weight_decay_params = []
     no_weight_decay_params = []
-    model = model.cuda(device)
     for name, param in model.named_parameters():
         if name.endswith('bias') or 'layer_norm' in name:
             no_weight_decay_params.append(param)
@@ -140,8 +137,7 @@ def main(args, local_rank):
     discarded_batches_acm = 0
     best_bleu = 0
     if hasattr(args, 'last_ckpt'):
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
-        ckpt = torch.load(args.last_ckpt, map_location=map_location)
+        ckpt = torch.load(args.last_ckpt, map_location='cpu')
         model.load_state_dict(ckpt['model_state_dict'])
         epoch = ckpt['epoch']
         batches_acm = ckpt['batches_acm']
@@ -152,9 +148,8 @@ def main(args, local_rank):
         del ckpt
 
     with open(os.path.join(args.ckpt, args.log_file), 'a') as log_f:
-        if local_rank == 0:
-            log_f.write('Start time: {}\n'.format(datetime.datetime.now()))
-            log_f.flush()
+        log_f.write('Start time: {}\n'.format(datetime.datetime.now()))
+        log_f.flush()
         for epoch in range(epoch, args.epochs):
             model.train()
             for batch in train_data:
@@ -173,11 +168,12 @@ def main(args, local_rank):
                     average_gradients(model)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 update_lr(optimizer, args.embed_dim, batches_acm, args.warmup_steps)
+
                 optimizer.step()
                 optimizer.zero_grad()
                 if args.world_size == 1 or (dist.get_rank() == 0):
                     if batches_acm % args.print_every == -1 % args.print_every:
-                        print ('Train Epoch %d, Batch %d, Discarded Batch %d,\
+                        print ('epoch %d, batch %d, discarded %d,\
                                 loss %.3f' % (epoch, batches_acm,
                                     discarded_batches_acm, loss_acm/batches_acm))
                         model.train()
@@ -186,14 +182,13 @@ def main(args, local_rank):
                         model.eval()
                         bleu, chrf = validate(model, dev_data,
                                 args.dev_data[:-len('.preproc.json')])
-                        log_f.write('{} {} {}\n'.format(epoch, bleu, chrf))
+                        log_f.write('{:3} {:.4f} {}\n'.format(epoch, bleu, chrf))
                         log_f.flush()
                         if bleu > best_bleu:
                             best_bleu = bleu
                             ckpt_files = get_ckpt_files(args.ckpt)
                             if len(ckpt_files) > 2:
-                                oldest = min(ckpt_files, key=os.path.getctime)
-                                os.remove(oldest)
+                                os.remove(min(ckpt_files, key=os.path.getctime))
                             torch.save({
                                 'args': args,
                                 'model_state_dict': model.state_dict(),

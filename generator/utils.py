@@ -50,6 +50,7 @@ def gelu_fast(x):
 def gelu(x: torch.Tensor) -> torch.Tensor:
     return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
+
 def label_smoothed_nll_loss(log_probs, target, eps):
     #log_probs: N x C
     #target: N

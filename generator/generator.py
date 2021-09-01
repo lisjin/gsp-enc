@@ -3,7 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 import math
 
-from encoder import TokenEncoder, RelationEncoder, AdjMatmulEncoder
+from encoder import TokenEncoder, RelationEncoder, FloydWarshallEncoder
 from decoder import DecodeLayer
 from transformer import Transformer, SinusoidalPositionalEmbedding, SelfAttentionMask
 from graph_transformer import GraphTransformer
@@ -15,17 +15,17 @@ class Generator(nn.Module):
                 word_char_dim, word_dim,
                 concept_char_dim, concept_dim,
                 cnn_filters, char2word_dim, char2concept_dim,
-                rel_dim, rnn_hidden_size, rel_num_heads,
+                rel_dim, rnn_hidden_size,
                 embed_dim, ff_embed_dim, num_heads, dropout,
                 snt_layers, graph_layers, inference_layers,
-                max_m, pretrained_file, device):
+                pretrained_file, device):
         super(Generator, self).__init__()
         self.vocabs = vocabs
         self.concept_encoder = TokenEncoder(vocabs['concept'], vocabs['concept_char'],
                                           concept_char_dim, concept_dim, embed_dim,
                                           cnn_filters, char2concept_dim, dropout, pretrained_file)
-        self.relation_encoder = AdjMatmulEncoder(vocabs['relation'], rel_dim,
-                embed_dim, rnn_hidden_size, rel_num_heads, dropout, max_m)
+        self.relation_encoder = FloydWarshallEncoder(vocabs['relation'], rel_dim,
+                embed_dim, rnn_hidden_size, dropout)
         self.token_encoder = TokenEncoder(vocabs['token'], vocabs['token_char'],
                         word_char_dim, word_dim, embed_dim,
                         cnn_filters, char2word_dim, dropout, pretrained_file)
@@ -51,25 +51,23 @@ class Generator(nn.Module):
         nn.init.constant_(self.probe_generator.bias, 0.)
         nn.init.constant_(self.concept_depth.weight, 0.)
 
-    def encoder_attn(self, inp):
-        with torch.no_grad():
-            concept_repr = self.embed_scale * self.concept_encoder(inp['concept'], inp['concept_char']) + self.concept_depth(inp['concept_depth'])
-            concept_repr = self.concept_embed_layer_norm(concept_repr)
-            concept_mask = torch.eq(inp['concept'], self.vocabs['concept'].padding_idx)
-
-            relation = self.relation_encoder(inp['relation_bank'], inp['relation_length'], inp['relation'])
-
-            attn = self.graph_encoder.get_attn_weights(concept_repr, relation, self_padding_mask=concept_mask)
-            # nlayers x tgt_len x src_len x  bsz x num_heads
-        return attn
-
-    def encode_step(self, inp):
+    def get_concept_relation(self, inp):
         concept_repr = self.embed_scale * self.concept_encoder(inp['concept'], inp['concept_char']) + self.concept_depth(inp['concept_depth'])
         concept_repr = self.concept_embed_layer_norm(concept_repr)
         concept_mask = torch.eq(inp['concept'], self.vocabs['concept'].padding_idx)
 
-        relation = self.relation_encoder(inp['relation_bank'], inp['relation_length'], inp['relation'])
+        relation = self.relation_encoder(inp['relation_bank'], inp['relation'])
+        return concept_repr, concept_mask, relation
 
+    def encoder_attn(self, inp):
+        with torch.no_grad():
+            concept_repr, concept_mask, relation = self.get_concept_relation(inp)
+            attn = self.graph_encoder.get_attn_weights(concept_repr, relation, self_padding_mask=concept_mask)
+            # nlayers x tgt_len x src_len x  bsz x num_heads
+        return attn
+
+    def encode_step(self, inp, train=True):
+        concept_repr, concept_mask, relation = self.get_concept_relation(inp)
         concept_repr = self.graph_encoder(concept_repr, relation, self_padding_mask=concept_mask)
 
         probe = torch.tanh(self.probe_generator(concept_repr[:1]))
@@ -79,7 +77,7 @@ class Generator(nn.Module):
 
     def work(self, data, beam_size, max_time_step, min_time_step=1):
         with torch.no_grad():
-            concept_repr, concept_mask, probe = self.encode_step(data)
+            concept_repr, concept_mask, probe = self.encode_step(data, train=False)
 
             mem_dict = {'graph_state':concept_repr,
                         'graph_padding_mask':concept_mask,

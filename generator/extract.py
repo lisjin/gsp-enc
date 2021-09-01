@@ -3,7 +3,7 @@
 from smatch import AMR
 from AMRGraph import AMRGraph, number_regexp
 from collections import Counter
-import json, re, os, argparse
+import json, re, os
 from AMRGraph import  _is_abs_form
 from multiprocessing import Pool
 
@@ -62,6 +62,7 @@ class LexicalMap(object):
             nxt += 1
         return cp_seq, token2idx, idx2token
 
+
 def read_file(filename):
     # read preprocessed amr file
     token, lemma, abstract, amrs = [], [], [], []
@@ -85,11 +86,13 @@ def make_vocab(batch_seq, char_level=False):
             char_cnt[ch] += y
     return cnt, char_cnt
 
+
 def write_vocab(vocab, path):
     with open(path, 'w') as fo:
         for x, y in vocab.most_common():
             fo.write('%s\t%d\n'%(x,y))
 
+import argparse
 def parse_config():
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_data', type=str)
@@ -155,6 +158,8 @@ if __name__ == "__main__":
     write_vocab(token_vocab, 'token_vocab')
     write_vocab(token_char_vocab, 'token_char_vocab')
     write_vocab(predictable_token_vocab, 'predictable_token_vocab')
+    #write_vocab(lemma_vocab, 'lem_vocab')
+    #write_vocab(lemma_char_vocab, 'lem_char_vocab')
     write_vocab(conc_vocab, 'concept_vocab')
     write_vocab(conc_char_vocab, 'concept_char_vocab')
     write_vocab(rel_vocab, 'relation_vocab')

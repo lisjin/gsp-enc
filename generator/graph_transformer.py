@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.nn import Parameter
 import torch.nn.functional as F
+import torch.jit as jit
 import math
 class GraphTransformer(nn.Module):
 
@@ -10,7 +11,7 @@ class GraphTransformer(nn.Module):
         self.layers = nn.ModuleList()
         for _ in range(layers):
             self.layers.append(GraphTransformerLayer(embed_dim, ff_embed_dim, num_heads, dropout, weights_dropout))
-    
+
     def forward(self, x, relation, kv = None,
                 self_padding_mask = None, self_attn_mask = None):
         for idx, layer in enumerate(self.layers):
@@ -50,9 +51,9 @@ class GraphTransformerLayer(nn.Module):
         # x: seq_len x bsz x embed_dim
         residual = x
         if kv is None:
-            x, self_attn = self.self_attn(query=x, key=x, value=x, relation=relation, key_padding_mask=self_padding_mask, attn_mask=self_attn_mask, need_weights=need_weights)
+            x, self_attn = self.self_attn(query=x, key=x, value=x, relation=relation, key_padding_mask=self_padding_mask, attn_mask=self_attn_mask, need_weights=need_weights, qkv_same=True)
         else:
-            x, self_attn = self.self_attn(query=x, key=kv, value=kv, relation=relation, key_padding_mask=self_padding_mask, attn_mask=self_attn_mask, need_weights=need_weights)
+            x, self_attn = self.self_attn(query=x, key=kv, value=kv, relation=relation, key_padding_mask=self_padding_mask, attn_mask=self_attn_mask, need_weights=need_weights, kv_same=True)
 
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.attn_layer_norm(residual + x)
@@ -65,7 +66,7 @@ class GraphTransformerLayer(nn.Module):
         x = self.ff_layer_norm(residual + x)
         return x, self_attn
 
-class RelationMultiheadAttention(nn.Module):
+class RelationMultiheadAttention(jit.ScriptModule):
     def __init__(self, embed_dim, num_heads, dropout=0., weights_dropout=True):
         super(RelationMultiheadAttention, self).__init__()
         self.embed_dim = embed_dim
@@ -90,14 +91,14 @@ class RelationMultiheadAttention(nn.Module):
         nn.init.constant_(self.in_proj_bias, 0.)
         nn.init.constant_(self.out_proj.bias, 0.)
 
-    def forward(self, query, key, value, relation, key_padding_mask=None, attn_mask=None, need_weights=False):
+    @jit.script_method
+    def forward(self, query, key, value, relation, key_padding_mask=None, attn_mask=None, need_weights=False, qkv_same=False, kv_same=False):
+        # type: (Tensor, Tensor, Tensor, Tensor, Optional[Tensor], Optional[Tensor], bool, bool, bool) -> Tuple[Tensor, Optional[Tensor]]
         """ Input shape: Time x Batch x Channel
             relation:  tgt_len x src_len x bsz x dim
             key_padding_mask: Time x batch
             attn_mask:  tgt_len x src_len
         """
-        qkv_same = query.data_ptr() == key.data_ptr() == value.data_ptr()
-        kv_same = key.data_ptr() == value.data_ptr()
 
         tgt_len, bsz, embed_dim = query.size()
         src_len = key.size(0)
@@ -130,7 +131,7 @@ class RelationMultiheadAttention(nn.Module):
         # k: tgt_len x src_len x bsz*heads x dim
         # v: src_len x bsz*heads x dim
 
-        attn_weights = torch.einsum('ijbn,ijbn->ijb', [q, k])
+        attn_weights = (q * k).sum(3)
         assert list(attn_weights.size()) == [tgt_len, src_len, bsz * self.num_heads]
 
         if attn_mask is not None:
@@ -156,7 +157,7 @@ class RelationMultiheadAttention(nn.Module):
 
         # attn_weights: tgt_len x src_len x bsz*heads
         # v: src_len x bsz*heads x dim
-        attn = torch.einsum('ijb,jbn->bin', [attn_weights, v])
+        attn = torch.matmul(attn_weights.permute(2, 0, 1), v.permute(1, 0, 2))
         if not self.weights_dropout:
             attn = F.dropout(attn, p=self.dropout, training=self.training)
 
@@ -166,12 +167,10 @@ class RelationMultiheadAttention(nn.Module):
         attn = self.out_proj(attn)
 
         if need_weights:
-            # maximum attention weight over heads 
+            # maximum attention weight over heads
             attn_weights = attn_weights.view(tgt_len, src_len, bsz, self.num_heads)
-        else:
-            attn_weights = None
 
-        return attn, attn_weights
+        return attn, (attn_weights if need_weights else None)
 
     def in_proj_qkv(self, query):
         return self._in_proj(query).chunk(3, dim=-1)
@@ -188,12 +187,15 @@ class RelationMultiheadAttention(nn.Module):
     def in_proj_v(self, value):
         return self._in_proj(value, start=2 * self.embed_dim)
 
-    def _in_proj(self, input, start=0, end=None):
+    def _in_proj(self, input, start=None, end=None):
+        # type: (Tensor, Optional[int], Optional[int]) -> Tensor
         weight = self.in_proj_weight
         bias = self.in_proj_bias
+        if start is None:
+            start = 0
+        if end is None:
+            end = weight.shape[0]
         weight = weight[start:end, :]
         if bias is not None:
             bias = bias[start:end]
         return F.linear(input, weight, bias)
-
-        return output

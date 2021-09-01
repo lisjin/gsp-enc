@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 dataset=../data/AMR/amr_2.0
-for a in $(seq 0.75 0.15 1.95); do
+for a in $(seq 1.5 0.1 2.0); do
     echo $a
     python3 work.py --test_data ${dataset}/dev.txt.features.preproc.json\
         --test_batch_size 2000\

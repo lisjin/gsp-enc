@@ -1,12 +1,13 @@
 import numpy as np
 
 import torch
-from torch import nn, Tensor
+from torch import nn
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 import torch.jit as jit
-from transformer import Embedding, MultiheadAttention
+from transformer import Embedding
 from typing import List
+import random
 import re
 
 def AMREmbedding(vocab, embedding_dim, pretrained_file=None, amr=False, dump_file=None):
@@ -121,15 +122,14 @@ class RelationEncoder(nn.Module):
 
         return output
 
-class AdjMatmulLayer(jit.ScriptModule):
-    def __init__(self, hidden_size, num_heads, dropout, weights_dropout=True):
-        super(AdjMatmulLayer, self).__init__()
+class FloydWarshallLayer(jit.ScriptModule):
+    def __init__(self, hidden_size, dropout):
+        super(FloydWarshallLayer, self).__init__()
         self.hidden_size = hidden_size
-        self.self_attn = MultiheadAttention(hidden_size, num_heads, dropout,
-                weights_dropout)
-        self.path_proj = nn.Linear(hidden_size * 2, hidden_size)
-        self.dropout = dropout
+        self.path_proj = nn.Linear(2 * hidden_size, hidden_size)
         self.layer_norm = nn.LayerNorm(hidden_size)
+        self.dropout = dropout
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -137,39 +137,25 @@ class AdjMatmulLayer(jit.ScriptModule):
         nn.init.constant_(self.path_proj.bias, 0.)
 
     @jit.script_method
-    def forward(self, state, relation, attn_mask, n):
-        # type: (Tensor, Tensor, Tensor, int) -> Tensor
-        bsz = relation.shape[2]
-        s_rows = state.unbind(0)
-        out_rows = jit.annotate(List[Tensor], [])
-        for i in range(n):
-            # Each s_ij attends to possible path prefixes s_ik
-            _, attn_weights = self.self_attn(query=s_rows[i], key=s_rows[i],
-                    value=s_rows[i], key_padding_mask=attn_mask[i], need_weights=True, qkv_same=True)
-            attn_weights = attn_weights.permute(2, 0, 1)  # k, j, b
+    def forward(self, row, col, n):
+        # type: (Tensor, Tensor, int) -> Tensor
+        row_rep = row.unsqueeze(1).expand(-1, n, -1, -1)
+        col_rep = col.unsqueeze(0).expand(n, -1, -1, -1)
 
-            # Use attention over k to collect r_kj per i, combining with s_ik
-            x = (s_rows[i].unsqueeze(1) * attn_weights.unsqueeze(3)).sum(0)
-            rel_mix = (attn_weights.unsqueeze(3) * relation).sum(0)
-            out = self.path_proj(torch.cat((x, rel_mix), 2))
-            out = F.relu(out, inplace=True)
-            out = F.dropout(out, p=self.dropout, training=self.training)
-            out_rows += [self.layer_norm(s_rows[i] + out)]
-        return torch.stack(out_rows)
+        rel = torch.cat((row_rep, col_rep), 3)
+        rel = F.relu(self.path_proj(rel), inplace=True)
+        rel = F.dropout(rel, p=self.dropout, training=self.training)
+        return self.layer_norm(rel)
 
-class AdjMatmulEncoder(jit.ScriptModule):
-    __constants__ = ['pad_idx', 'max_m']
-    def __init__(self, vocab, rel_dim, embed_dim, hidden_size, num_heads, dropout,
-            max_m):
-        super(AdjMatmulEncoder, self).__init__()
-        self.pad_idx = vocab._padding_idx
-        self.max_m = max_m
-        self.hidden_size = hidden_size
+class FloydWarshallEncoder(jit.ScriptModule):
+    def __init__(self, vocab, rel_dim, embed_dim, hidden_size, dropout):
+        super(FloydWarshallEncoder, self).__init__()
         self.dropout = dropout
         self.rel_embed = AMREmbedding(vocab, rel_dim)
         self.rel_proj = nn.Linear(rel_dim, hidden_size)
-        self.layer = AdjMatmulLayer(hidden_size, num_heads, dropout)
-        self.out_proj = nn.Linear(hidden_size, embed_dim)
+        self.layer = FloydWarshallLayer(hidden_size, dropout)
+        self.out_proj = nn.Linear(hidden_size * 2, embed_dim)
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -179,22 +165,21 @@ class AdjMatmulEncoder(jit.ScriptModule):
         nn.init.constant_(self.out_proj.bias, 0.)
 
     @jit.script_method
-    def forward(self, src_tokens, src_lengths, rel_type):
-        # type: (Tensor, Tensor, Tensor) -> Tensor
+    def forward(self, src_tokens, rel_type):
+        # type: (Tensor, Tensor) -> Tensor
         x = self.rel_embed(src_tokens)
         x = F.dropout(x, p=self.dropout, training=self.training, inplace=True)
 
         n, _, bsz = rel_type.shape
-        relation = self.rel_proj(x).squeeze_(0)
+        relation = self.rel_proj(x)
         relation = relation.index_select(0, rel_type.reshape(-1)).view(n, n, bsz, -1)
 
-        state = relation.clone()
-        attn_mask = (rel_type == self.pad_idx)
-        diag = torch.eye(n, dtype=torch.bool, device=attn_mask.device)
-        attn_mask.masked_fill_(diag.unsqueeze(2), 0)
-        for m in range(min(self.max_m, n)):
-            state = self.layer(state, relation, attn_mask, n)
-        output = self.out_proj(state)
+        residual = relation
+        hidden_size = relation.shape[3]
+        for k in range(1, n):
+            relation = self.layer(relation[k], relation[:, k], n)
+        relation = torch.cat((residual, relation), 3)
+        output = self.out_proj(relation)
         return output
 
 class TokenEncoder(nn.Module):
@@ -221,11 +206,11 @@ class TokenEncoder(nn.Module):
         char_repr = self.char2token(char_repr).view(seq_len, bsz, -1)
         token_repr = self.token_embed(token_input)
 
-        token = F.dropout(torch.cat([char_repr,token_repr], -1), p=self.dropout, training=self.training)
+        token = F.dropout(torch.cat([char_repr,token_repr], -1), p=self.dropout, training=self.training, inplace=True)
         token = self.out_proj(token)
         return token
 
-class CNNEncoder(nn.Module):
+class CNNEncoder(jit.ScriptModule):
     def __init__(self, filters, input_dim, output_dim, highway_layers=1):
         super(CNNEncoder, self).__init__()
         self.convolutions = nn.ModuleList()
@@ -240,15 +225,17 @@ class CNNEncoder(nn.Module):
         nn.init.normal_(self.out_proj.weight, std=0.02)
         nn.init.constant_(self.out_proj.bias, 0.)
 
+    @jit.script_method
     def forward(self, input):
+        # type: (Tensor) -> Tensor
         # input: batch_size x seq_len x input_dim
         x  = input.transpose(1, 2)
-        conv_result = []
+        conv_result = jit.annotate(List[Tensor], [])
         for i, conv in enumerate(self.convolutions):
             y = conv(x)
             y, _ = torch.max(y, -1)
-            y = F.relu(y, inplace=True)
-            conv_result.append(y)
+            y = F.relu(y)
+            conv_result += [y]
 
         conv_result = torch.cat(conv_result, dim=-1)
         conv_result = self.highway(conv_result)
